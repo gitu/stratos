@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "stratos",
+  "compatibility_date": "2026-06-20",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  },
+  "routes": [
+    { "pattern": "stratos.xn--hh-via.ch", "custom_domain": true }
+  ]
+}
