@@ -1,0 +1,7 @@
+html, body, #root { margin: 0; padding: 0; height: 100%; background: #0a0e13; }
+* { box-sizing: border-box; }
+input[type="range"] { accent-color: #56c8e8; margin: 0; display: block; max-width: 100%; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #223040; border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+@keyframes blinkdot { 0%,100% { opacity: 1; } 50% { opacity: 0.25; } }
