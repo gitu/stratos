@@ -98,6 +98,8 @@ export default class App extends React.Component {
     window.removeEventListener('resize', this._onResize);
     cancelAnimationFrame(this._raf);
     clearTimeout(this._deb);
+    clearTimeout(this._planTimer);
+    this._planGen = (this._planGen || 0) + 1;
     if (this._ro) this._ro.disconnect();
   }
   componentDidUpdate() {
@@ -344,7 +346,6 @@ export default class App extends React.Component {
   recompute() {
     if (!this.sim) return;
     const { cfg, target } = this.state;
-    const t0H = this.t0H();
     this.perf = this.sim.computePayload(cfg);
     let pts = [], areaCountry = null;
     if (this.state.areaMode === 'custom') {
@@ -355,18 +356,149 @@ export default class App extends React.Component {
       areaCountry = this.sim.COUNTRIES.find((c) => c.id === this.state.areaCountryId) || this.sim.COUNTRIES[0];
       pts = this.sim.samplePoints(areaCountry.poly, 12);
     }
-    this.results = (this.perf.canLift && pts.length)
-      ? this.sim.rankPoints(pts, target, this.perf, this.captureKm(), t0H, 6, 5)
-      : [];
-    if (areaCountry) for (const r of this.results) r.country = areaCountry;
-    const sel = Math.min(this.state.selected, Math.max(0, this.results.length - 1));
-    const selSite = this.results[sel] ? this.results[sel].site : null;
-    this.strategies = selSite ? this.sim.compareStrategies(selSite, target, cfg, this.captureKm(), t0H) : [];
-    this.windowData = (selSite && this.perf.canLift)
-      ? this.sim.launchWindow(selSite, target, this.perf, { days: 20, stepDays: 2, members: 6, captureKm: this.captureKm() })
-      : [];
-    const max = this.scrubMaxH();
-    this.setState((s) => ({ rev: s.rev + 1, selected: sel, scrubH: Math.min(s.scrubH, max) }));
+    if (this.perf.canLift && pts.length) {
+      this.startPlanner(pts, target, areaCountry);
+    } else {
+      this._planGen = (this._planGen || 0) + 1;
+      clearTimeout(this._planTimer);
+      this.results = []; this.strategies = []; this.windowData = [];
+      this.plannerStatus = null;
+      this.setState((s) => ({ rev: s.rev + 1, selected: 0, scrubH: 0 }));
+    }
+  }
+
+  // Incremental planner: every launch point is tried at several start days
+  // ("launch over the next few days"), evaluated in small async batches so the
+  // ranked list grows live, then the top points' arrival probability is refined
+  // one Monte Carlo member at a time before strategies/window are computed.
+  startPlanner(pts, target, areaCountry) {
+    const gen = this._planGen = (this._planGen || 0) + 1;
+    clearTimeout(this._planTimer);
+    // routes are about to be replaced — don't keep flying along a stale one
+    if (this.state.playing) { cancelAnimationFrame(this._raf); this.setState({ playing: false }); }
+    const perf = this.perf, captureKm = this.captureKm(), baseT0 = this.t0H();
+    const SCAN_DAYS = 4, MC_TOP = 5, MC_MEMBERS = 10, BATCH = 6;
+    // day-major order: the whole field shows up at day 0 first, later days refine
+    const cands = [];
+    for (let d = 0; d <= SCAN_DAYS; d++) pts.forEach((pt, pi) => cands.push({ pt, pi, day: d }));
+    const byPoint = pts.map(() => []);
+    this.plannerStatus = { phase: 'sim', done: 0, total: cands.length, mcDone: 0, mcTotal: 0 };
+    this.results = [];
+
+    const rebuild = () => {
+      const built = [];
+      for (const vars of byPoint) {
+        if (!vars.length) continue;
+        vars.sort((a, b) => (this.sim.betterLaunch(a, b) ? -1 : 1));
+        const best = vars[0];
+        built.push({
+          ...best,
+          site: { name: '', lat: best.site.lat, lon: best.site.lon },
+          variants: vars, _v: best, mc: best.mc || null,
+          country: areaCountry || undefined,
+          directKm: this.sim.gcKm(best.site.lat, best.site.lon, target.lat, target.lon),
+        });
+      }
+      built.sort((a, b) => (this.sim.betterLaunch(a, b) ? -1 : 1));
+      built.forEach((r, i) => { r.site.name = 'PT ' + String(i + 1).padStart(2, '0'); });
+      this.results = built;
+    };
+    const bump = () => this.setState((s) => ({
+      rev: s.rev + 1,
+      selected: Math.min(s.selected, Math.max(0, this.results.length - 1)),
+      scrubH: Math.min(s.scrubH, this.scrubMaxH()),
+    }));
+
+    let ci = 0, mcRound = 1, mcDone = 0;
+    const simTick = () => {
+      if (gen !== this._planGen) return;
+      const end = Math.min(ci + BATCH, cands.length);
+      for (; ci < end; ci++) {
+        const c = cands[ci];
+        const t0H = baseT0 + c.day * 24;
+        const r = this.sim.simulate(c.pt, target, {
+          bandLo: perf.bandLo, bandHi: perf.bandHi, budgetKm: perf.budgetKm,
+          capDays: perf.capDays, captureKm, t0H,
+        });
+        byPoint[c.pi].push({ ...r, startDay: c.day, t0H, mc: null, site: { name: '', lat: c.pt.lat, lon: c.pt.lon } });
+      }
+      this.plannerStatus.done = ci;
+      rebuild();
+      bump();
+      this._planTimer = setTimeout(ci < cands.length ? simTick : mcTick, 0);
+    };
+    const mcTick = () => {
+      if (gen !== this._planGen) return;
+      if (mcRound >= MC_MEMBERS || !this.results.length) { finish(); return; }
+      const top = this.results.slice(0, MC_TOP);
+      this.plannerStatus.phase = 'mc';
+      this.plannerStatus.mcTotal = top.length * (MC_MEMBERS - 1);
+      for (const res of top) {
+        if (!res._runs) res._runs = [{ arrived: res.arrived, tArrH: res.tArrH, closestKm: res.closestKm }];
+        res._runs.push(this.sim.mcMember(res.site, target, perf, res.t0H, mcRound, captureKm));
+        res.mc = this.sim.mcAggregate(res._runs);
+        res._v.mc = res.mc;
+        mcDone++;
+      }
+      this.plannerStatus.mcDone = mcDone;
+      mcRound++;
+      bump();
+      this._planTimer = setTimeout(mcTick, 0);
+    };
+    const finish = () => {
+      if (gen !== this._planGen) return;
+      this.plannerStatus = { phase: 'done' };
+      this.recomputeSelection();
+    };
+    this._planTimer = setTimeout(simTick, 0);
+  }
+
+  // Light recompute on selection/variant change: strategies + launch window only.
+  recomputeSelection() {
+    const res = this.selRoute();
+    if (!res || !this.perf || !this.perf.canLift) {
+      this.strategies = []; this.windowData = [];
+    } else {
+      const { cfg, target } = this.state;
+      this.strategies = this.sim.compareStrategies(res.site, target, cfg, this.captureKm(), res.t0H ?? this.t0H());
+      this.windowData = this.sim.launchWindow(res.site, target, this.perf, { days: 20, stepDays: 2, members: 6, captureKm: this.captureKm() });
+    }
+    this.setState((s) => ({ rev: s.rev + 1 }));
+  }
+
+  selectResult(i) {
+    this.setState({ selected: i, scrubH: 0, playing: false }, () => this.recomputeSelection());
+  }
+
+  // Switch the selected point to one of its alternate start-day routes.
+  pickVariant(i, startDay) {
+    const res = this.results && this.results[i];
+    if (!res || !res.variants) return;
+    const v = res.variants.find((x) => x.startDay === startDay);
+    if (!v || v === res._v) return;
+    Object.assign(res, {
+      path: v.path, arrived: v.arrived, tArrH: v.tArrH, closestKm: v.closestKm,
+      flownKm: v.flownKm, altUsedKm: v.altUsedKm, budgetLeftKm: v.budgetLeftKm,
+      startDay: v.startDay, t0H: v.t0H, mc: v.mc, _v: v, _runs: null,
+    });
+    if (!res.mc && this.perf && this.perf.canLift) {
+      res.mc = v.mc = this.sim.monteCarloDay(res.site, this.state.target, this.perf, v.t0H, 6, this.captureKm());
+    }
+    this.setState({ selected: i, scrubH: 0, playing: false }, () => this.recomputeSelection());
+  }
+
+  selT0H() {
+    const r = this.selRoute();
+    return r && r.t0H != null ? r.t0H : this.t0H();
+  }
+
+  // Draw strength for a route: the better it ranks (and if it arrives), the stronger.
+  routeGrade(i) {
+    const n = (this.results || []).length;
+    const res = this.results && this.results[i];
+    if (!res) return 0.2;
+    const rank = n > 1 ? 1 - i / (n - 1) : 1;
+    return res.arrived ? 0.45 + 0.55 * rank : 0.08 + 0.2 * rank;
   }
   scheduleRecompute() {
     clearTimeout(this._deb);
@@ -420,7 +552,7 @@ export default class App extends React.Component {
       outer: '#070a0f', bg: '#0c1218', landFill: '#151f2a', coast: 'rgba(125,155,180,0.45)',
       tileFilter: 'saturate(0.85) brightness(0.95)',
       grid: 'rgba(86,200,232,0.08)',
-      dim: 'rgba(120,160,190,0.28)', sel: '#56c8e8', selGlow: 'rgba(86,200,232,0.3)',
+      dim: 'rgba(120,160,190,0.28)', route: 'rgba(111,213,138,0.65)', sel: '#56c8e8', selGlow: 'rgba(86,200,232,0.3)',
       site: '#5f7a90', target: '#e8b356', balloon: '#56c8e8',
       wind: 'rgba(140,180,205,0.24)', label: 'rgba(190,210,225,0.9)', city: 'rgba(150,172,190,0.8)', country: 'rgba(86,200,232,0.35)',
     };
@@ -533,7 +665,7 @@ export default class App extends React.Component {
     if (this.state.showWinds) {
       const b0 = this.balloonAt(this.state.scrubH);
       const alt = b0 ? b0.alt : ((this.perf && this.perf.ceiling) || 12);
-      const t = this.t0H() + this.state.scrubH;
+      const t = this.selT0H() + this.state.scrubH;
       const stepPx = 36;
       x.lineWidth = 1;
       for (let py = Math.max(0, cy - R); py < Math.min(H, cy + R); py += stepPx) {
@@ -580,10 +712,18 @@ export default class App extends React.Component {
     };
     (this.results || []).forEach((res, i) => {
       if (i === this.state.selected) return;
-      path3(res.path, C.dim, 1);
+      const g = this.routeGrade(i);
+      x.globalAlpha = g;
+      path3(res.path, res.arrived ? C.route : C.dim, 0.7 + 1.6 * g);
     });
+    x.globalAlpha = 1;
     const sel = this.selRoute();
     if (sel) {
+      if (sel.variants && sel.variants.length > 1) {
+        x.setLineDash([3, 5]); x.globalAlpha = 0.4;
+        for (const vv of sel.variants) { if (vv !== sel._v) path3(vv.path, C.sel, 0.8); }
+        x.setLineDash([]); x.globalAlpha = 1;
+      }
       path3(sel.path, C.selGlow, 4);
       path3(sel.path, C.dim, 1);
       path3(sel.path, C.sel, 1.6, this.state.scrubH);
@@ -748,7 +888,7 @@ export default class App extends React.Component {
     if (this.state.showWinds) {
       const b0 = this.balloonAt(this.state.scrubH);
       const alt = b0 ? b0.alt : ((this.perf && this.perf.ceiling) || 12);
-      const t = this.t0H() + this.state.scrubH;
+      const t = this.selT0H() + this.state.scrubH;
       x.strokeStyle = C.wind; x.lineWidth = 1;
       const stepPx = 34;
       for (let py = Math.max(0, topY) + stepPx / 2; py < botY; py += stepPx) {
@@ -786,10 +926,18 @@ export default class App extends React.Component {
     for (const sh of shifts) {
       (this.results || []).forEach((res, i) => {
         if (i === this.state.selected) return;
-        drawPath(res.path, C.dim, 1, null, sh);
+        const g = this.routeGrade(i);
+        x.globalAlpha = g;
+        drawPath(res.path, res.arrived ? C.route : C.dim, 0.7 + 1.6 * g, null, sh);
       });
+      x.globalAlpha = 1;
       const sel = this.selRoute();
       if (sel) {
+        if (sel.variants && sel.variants.length > 1) {
+          x.setLineDash([3, 5]); x.globalAlpha = 0.4;
+          for (const vv of sel.variants) { if (vv !== sel._v) drawPath(vv.path, C.sel, 0.8, null, sh); }
+          x.setLineDash([]); x.globalAlpha = 1;
+        }
         drawPath(sel.path, C.selGlow, 4, null, sh);
         drawPath(sel.path, C.dim, 1, null, sh);
         drawPath(sel.path, C.sel, 1.6, this.state.scrubH, sh);
@@ -1029,11 +1177,12 @@ export default class App extends React.Component {
     ] : [];
 
     let wind = { u: 0, v: 0 };
-    if (this.sim && b) wind = this.sim.windAt(b.lat, b.lon, b.alt, this.t0H() + s.scrubH);
+    if (this.sim && b) wind = this.sim.windAt(b.lat, b.lon, b.alt, this.selT0H() + s.scrubH);
     const wspd = Math.hypot(wind.u, wind.v);
     const wdir = (Math.atan2(wind.u, wind.v) * 180 / Math.PI + 360) % 360;
-    const utc = new Date(T0 + (this.t0H() + s.scrubH) * 3600 * 1000);
+    const utc = new Date(T0 + (this.selT0H() + s.scrubH) * 3600 * 1000);
     const arrived = (this.results || []).filter((r) => r.arrived).length;
+    const ps = this.plannerStatus;
     const selectedName = sel ? sel.site.name.toUpperCase() : '—';
     const srcLabel = s.fetching ? 'FETCHING GFS…' : s.liveError ? 'SRC: SYNTH (LIVE FAILED)' : s.windSource === 'live' ? 'SRC: OPEN-METEO' : 'SRC: SYNTH-CLIM';
 
@@ -1055,7 +1204,7 @@ export default class App extends React.Component {
           <div style={{ color: '#647a8e', letterSpacing: 1 }}>LONG-DURATION BALLOON MISSION DESIGN</div>
           <div style={{ flex: 1 }} />
           <div style={{ display: 'flex', gap: 18, color: '#647a8e' }}>
-            <div>LAUNCH <span style={{ color: '#c6d2dd' }}>{new Date(T0 + this.t0H() * 3600e3).toISOString().slice(0, 10)} 00Z</span></div>
+            <div>LAUNCH <span data-testid="launch-date" style={{ color: '#c6d2dd' }}>{new Date(T0 + this.selT0H() * 3600e3).toISOString().slice(0, 10)} 00Z</span></div>
             <div>TGT <span style={{ color: '#e8b356' }}>{this.fmtLL(s.target.lat, s.target.lon)}</span></div>
             <div>WIND MODEL <span style={{ color: '#6fd58a' }}>{s.windSource === 'live' ? 'OPEN-METEO GFS' : 'SYNTH-CLIM v2'}</span></div>
           </div>
@@ -1126,7 +1275,14 @@ export default class App extends React.Component {
               )}
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
                 <div style={{ fontSize: 10, letterSpacing: 2, color: '#647a8e' }}>LAUNCH POINTS — RANKED</div>
-                <div style={{ fontSize: 10, color: '#41576b' }}>{arrived}/{this.results?.length || 0} REACH TARGET</div>
+                <div style={{ fontSize: 10, color: ps && ps.phase !== 'done' ? '#56c8e8' : '#41576b' }} data-testid="planner-status">
+                  {ps && ps.phase === 'sim' ? 'SIMULATING ' + ps.done + '/' + ps.total
+                    : ps && ps.phase === 'mc' ? 'REFINING P · ' + ps.mcDone + '/' + ps.mcTotal
+                    : arrived + '/' + (this.results?.length || 0) + ' REACH TARGET'}
+                </div>
+              </div>
+              <div style={{ color: '#41576b', fontSize: 10, marginBottom: 8 }}>
+                EACH POINT SCANNED OVER THE NEXT 5 START DAYS · BEST SHOWN, ALTERNATES SELECTABLE
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }} data-testid="site-list">
                 {(this.results || []).map((res, i) => {
@@ -1141,9 +1297,11 @@ export default class App extends React.Component {
                     status = st.txt; statusColor = st.color;
                     med = 'nominal run';
                   }
+                  const variants = (res.variants && res.variants.length > 1)
+                    ? [...res.variants].sort((a, b) => a.startDay - b.startDay) : null;
                   return (
                     <div key={i}
-                      onClick={() => { this.setState({ selected: i, scrubH: 0, playing: false }); this.scheduleRecompute(); }}
+                      onClick={() => this.selectResult(i)}
                       style={{
                         display: 'flex', alignItems: 'center', gap: 9, padding: '7px 9px', cursor: 'pointer',
                         borderLeft: '2px solid ' + (res.custom ? '#e8b356' : (i === s.selected ? '#56c8e8' : '#1b2530')),
@@ -1153,10 +1311,30 @@ export default class App extends React.Component {
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div style={{ color: res.custom ? '#e8b356' : (i === s.selected ? '#e8eef4' : '#9db0c0'), fontSize: 11, fontWeight: 600, letterSpacing: 0.5 }}>
                           {(res.custom ? '◆ ' : '') + res.site.name.toUpperCase()}
+                          <span style={{ color: '#56c8e8', fontWeight: 400, marginLeft: 6 }}>{'↑ ' + dateOf(s.launchDay + (res.startDay || 0))}</span>
                         </div>
                         <div style={{ color: '#647a8e', fontSize: 10, marginTop: 1 }}>
                           {'launch ' + this.fmtLL(res.site.lat, res.site.lon) + ' · ' + med + ' · direct ' + this.fmtKm(res.directKm)}
                         </div>
+                        {i === s.selected && variants && (
+                          <div style={{ display: 'flex', gap: 4, marginTop: 5, flexWrap: 'wrap' }} data-testid="variant-chips">
+                            {variants.map((vv) => {
+                              const active = vv.startDay === res.startDay;
+                              return (
+                                <div key={vv.startDay}
+                                  onClick={(e) => { e.stopPropagation(); this.pickVariant(i, vv.startDay); }}
+                                  style={{
+                                    padding: '2px 6px', fontSize: 9, cursor: 'pointer', whiteSpace: 'nowrap',
+                                    border: '1px solid ' + (active ? '#56c8e8' : '#2a3a4a'),
+                                    color: active ? '#56c8e8' : vv.arrived ? '#6fd58a' : '#e2705f',
+                                    background: active ? '#10202c' : 'transparent',
+                                  }}>
+                                  {dateOf(s.launchDay + vv.startDay) + ' ' + (vv.arrived ? this.fmtDur(vv.tArrH) : 'miss ' + this.fmtKm(vv.closestKm))}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                       <div style={{ color: statusColor, fontSize: 10, fontWeight: 600, textAlign: 'right', whiteSpace: 'nowrap' }}>{status}</div>
                     </div>
@@ -1199,10 +1377,10 @@ export default class App extends React.Component {
             <div style={{ padding: '12px 14px', borderBottom: PANEL_BORDER }}>
               <div style={sectionTitle}>BALLOON &amp; PAYLOAD</div>
 
-              <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
-                {[['zeropressure', 'ZERO-PRESS'], ['superpressure', 'SUPERPRESS'], ['adjustable', 'ADJUSTABLE']].map(([k, label]) => (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 6 }}>
+                {[['zeropressure', 'ZERO-PRESS'], ['superpressure', 'SUPERPRESS'], ['adjustable', 'ADJUSTABLE'], ['roziere', 'ROZIÈRE']].map(([k, label]) => (
                   <div key={k} onClick={() => this.updateCfg({ type: k })} style={{
-                    flex: 1, textAlign: 'center', padding: '6px 2px', fontSize: 10, letterSpacing: 0.5, cursor: 'pointer',
+                    flex: '1 0 45%', textAlign: 'center', padding: '6px 2px', fontSize: 10, letterSpacing: 0.5, cursor: 'pointer',
                     border: '1px solid ' + (s.cfg.type === k ? '#2b4a58' : '#1b2530'),
                     color: s.cfg.type === k ? '#56c8e8' : '#647a8e',
                     background: s.cfg.type === k ? '#101c24' : 'transparent',
@@ -1241,7 +1419,7 @@ export default class App extends React.Component {
                 </div>
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-                    <span style={{ color: '#647a8e', fontSize: 10 }}>BALLAST</span>
+                    <span style={{ color: '#647a8e', fontSize: 10 }}>{s.cfg.type === 'roziere' ? 'BURNER FUEL' : 'BALLAST'}</span>
                     <span style={{ color: '#c6d2dd', fontSize: 11 }}>{s.cfg.ballastKg} kg</span>
                   </div>
                   <input type="range" min={0} max={800} step={5} value={s.cfg.ballastKg}

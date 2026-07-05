@@ -25,6 +25,7 @@ test.describe('STRATOS Route Planner', () => {
     // strategy comparison renders all three philosophies
     await expect(page.getByText('Superpressure — constant altitude')).toBeVisible();
     await expect(page.getByText('Zero-pressure — ballast steering')).toBeVisible();
+    await expect(page.getByText('Rozière — hybrid gas/hot-air, burner trim')).toBeVisible();
     await expect(page.getByText('Adjustable — vent/ballast wind-layer steering')).toBeVisible();
     await shot(page, testInfo, '01-boot');
   });
@@ -39,6 +40,10 @@ test.describe('STRATOS Route Planner', () => {
   });
 
   test('flies the mission along the selected route', async ({ page }, testInfo) => {
+    // wait for the live fetch + incremental planner to settle, or playback would
+    // be stopped mid-test when the forecast lands and routes are replaced
+    await expect(page.getByTestId('wind-source')).toHaveText('SRC: OPEN-METEO', { timeout: 75_000 });
+    await expect(page.getByTestId('planner-status')).toContainText('REACH TARGET', { timeout: 30_000 });
     await expect(page.getByTestId('play')).toHaveText('▶ FLY');
     await expect(page.getByText(/^T\+00d 00h$/)).toBeVisible();
     await page.getByTestId('play').click();
@@ -46,8 +51,28 @@ test.describe('STRATOS Route Planner', () => {
     // 10 sim-hours per real second -> T+ readout must advance
     await expect(page.getByText(/^T\+00d 00h$/)).toHaveCount(0, { timeout: 10_000 });
     await shot(page, testInfo, '03-flying');
-    await page.getByTestId('play').click();
-    await expect(page.getByTestId('play')).toHaveText('▶ FLY');
+    // pause — unless the (possibly short) route already finished and auto-stopped
+    const play = page.getByTestId('play');
+    if (await play.textContent() === '❚❚ HOLD') await play.click();
+    await expect(play).toHaveText('▶ FLY');
+  });
+
+  test('spreads candidates over start days and offers alternate routes per point', async ({ page }, testInfo) => {
+    // incremental planner: candidates simulate in batches, then P% refines
+    await expect(page.getByTestId('planner-status')).toContainText('REACH TARGET', { timeout: 30_000 });
+    const rows = page.getByTestId('site-list').locator('> div');
+    await rows.first().click();
+    // every point is scanned across 5 start days; the selected row lists them
+    const chips = page.getByTestId('variant-chips').locator('> div');
+    await expect(chips).toHaveCount(5);
+    // picking an alternate start day moves the mission launch date
+    const date0 = await page.getByTestId('launch-date').textContent();
+    for (let k = 0; k < 5; k++) {
+      await chips.nth(k).click();
+      if ((await page.getByTestId('launch-date').textContent()) !== date0) break;
+    }
+    await expect(page.getByTestId('launch-date')).not.toHaveText(date0);
+    await shot(page, testInfo, '07-start-day-variants');
   });
 
   test('map click retargets the mission and routes recompute', async ({ page }, testInfo) => {
@@ -68,6 +93,10 @@ test.describe('STRATOS Route Planner', () => {
     await expect(page.getByText('100 d max')).toBeVisible();
     await expect(page.getByText('FLOAT CEILING')).toBeVisible();
     await shot(page, testInfo, '05-superpressure');
+    // Rozière relabels the consumable slider: fuel burns instead of ballast drops
+    await page.getByText('ROZIÈRE', { exact: true }).click();
+    await expect(page.getByText('BURNER FUEL')).toBeVisible();
+    await shot(page, testInfo, '05b-roziere');
   });
 
   test('view and overlay toggles work', async ({ page }, testInfo) => {

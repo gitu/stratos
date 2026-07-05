@@ -16,12 +16,15 @@ in the browser against **actual wind forecasts** (Open-Meteo GFS pressure-level 
 - **Live forecast winds** — Open-Meteo GFS at 7 pressure levels (850–50 hPa),
   fetched on startup; toggle back to the simulated climatology any time
 - **Physics model** — ISA atmosphere, helium/hydrogen lift, envelope mass,
-  float-ceiling bisection, ballast/vent budgets for zero-pressure,
-  superpressure and altitude-adjustable balloons
+  float-ceiling bisection, ballast/vent/fuel budgets for zero-pressure,
+  superpressure, altitude-adjustable and Rozière (hybrid gas/hot-air) balloons
 - **Trajectory simulation with altitude steering** — hourly integration picking
   the wind layer that best advances toward the target
-- **Launch-point ranking** — samples candidate points in a country or custom
-  circular area, ranks by arrival, with 6-member Monte Carlo wind ensembles
+- **Launch-point ranking, spread over start days** — samples candidate points in
+  a country or custom circular area and tries each across the next 5 launch days,
+  ranking by earliest absolute arrival; computed incrementally so results appear
+  live and Monte Carlo P% refines member by member; alternate start-day routes
+  stay selectable per point, and better routes draw stronger on the map
 - **Launch-window scan** — arrival probability vs. start date, click to set
 - **Mission playback** — fly the route with a time scrubber and altitude profile
 

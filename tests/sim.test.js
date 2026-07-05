@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   isa, gasRho, computePayload, windAt, setLiveField, hasLive,
   gcKm, wrapLon, simulate, samplePoints, samplePointsInCircle,
-  rankPoints, monteCarloDay, launchWindow, compareStrategies,
+  rankPoints, monteCarloDay, mcMember, mcAggregate, betterLaunch, launchWindow, compareStrategies,
   pointInPoly, COUNTRIES, CITIES, CONTINENTS,
 } from '../src/sim.js';
 
@@ -175,11 +175,48 @@ describe('mission planning', () => {
     }
     expect(ranked[0].mc).not.toBeNull();
   });
+  it('models a Rozière hybrid: fuel-limited, outlasts zero-pressure', () => {
+    const cfg = { volume: 25000, payloadKg: 900, ballastKg: 300, gas: 'helium' };
+    const rz = computePayload({ ...cfg, type: 'roziere' });
+    expect(rz.canLift).toBe(true);
+    expect(rz.bandHi).toBeCloseTo(rz.ceiling, 6);
+    expect(rz.bandLo).toBeGreaterThanOrEqual(4);
+    expect(rz.bandHi - rz.bandLo).toBeLessThanOrEqual(6);
+    // the hot-air cone adds envelope mass, so the same volume floats lower
+    const zp = computePayload({ ...cfg, type: 'zeropressure' });
+    expect(rz.ceiling).toBeLessThan(zp.ceiling);
+    // burner diurnal compensation beats dropping ballast for endurance
+    expect(rz.capDays).toBeGreaterThan(zp.capDays);
+    // no fuel, no control or endurance
+    const dry = computePayload({ ...cfg, ballastKg: 0, type: 'roziere' });
+    expect(dry.budgetKm).toBe(0);
+  });
   it('monte carlo probability is a valid fraction', () => {
     const mc = monteCarloDay({ lat: 34.5, lon: -104.2 }, target, perf, 0, 4, 200);
     expect(mc.p).toBeGreaterThanOrEqual(0);
     expect(mc.p).toBeLessThanOrEqual(1);
     expect(mc.members).toBe(4);
+  });
+  it('incremental members aggregate to the same result as monteCarloDay', () => {
+    const site = { lat: 34.5, lon: -104.2 };
+    const runs = [];
+    for (let m = 0; m < 4; m++) runs.push(mcMember(site, target, perf, 0, m, 200));
+    expect(mcAggregate(runs)).toEqual(monteCarloDay(site, target, perf, 0, 4, 200));
+  });
+  it('betterLaunch prefers arrival, then earliest absolute arrival across start days', () => {
+    const hit = { arrived: true, tArrH: 100, closestKm: 0, startDay: 0 };
+    const miss = { arrived: false, tArrH: null, closestKm: 500, startDay: 0 };
+    expect(betterLaunch(hit, miss)).toBe(true);
+    // launching 2 days later but flying 100 h beats launching now and flying 200 h
+    const late = { arrived: true, tArrH: 100, closestKm: 0, startDay: 2 };
+    const early = { arrived: true, tArrH: 200, closestKm: 0, startDay: 0 };
+    expect(betterLaunch(late, early)).toBe(true);
+    // ...but not if the delay outweighs the faster flight
+    const veryLate = { arrived: true, tArrH: 180, closestKm: 0, startDay: 4 };
+    expect(betterLaunch(early, veryLate)).toBe(true);
+    // among misses, closest approach wins regardless of start day
+    const missNear = { arrived: false, closestKm: 300, startDay: 3 };
+    expect(betterLaunch(missNear, miss)).toBe(true);
   });
   it('launch window scans the requested date range', () => {
     const w = launchWindow({ lat: 34.5, lon: -104.2 }, target, perf, { days: 8, stepDays: 4, members: 2 });
@@ -188,7 +225,7 @@ describe('mission planning', () => {
   it('compares the three altitude strategies', () => {
     const rows = compareStrategies({ lat: 34.5, lon: -104.2 }, target,
       { volume: 25000, payloadKg: 900, ballastKg: 300, gas: 'helium', type: 'adjustable' });
-    expect(rows.map((r) => r.key)).toEqual(['superpressure', 'zeropressure', 'adjustable']);
+    expect(rows.map((r) => r.key)).toEqual(['superpressure', 'zeropressure', 'roziere', 'adjustable']);
     for (const row of rows) expect(row.r === null || typeof row.r.arrived === 'boolean').toBe(true);
   });
 });

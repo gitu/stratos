@@ -35,7 +35,8 @@ export function gasRho(hKm, gas) {
 // cfg: { volume (m3, fully inflated), payloadKg, ballastKg, gas, type }
 export function computePayload(cfg) {
   const V = cfg.volume;
-  const envelopeKg = 0.045 * Math.pow(V, 0.8);
+  let envelopeKg = 0.045 * Math.pow(V, 0.8);
+  if (cfg.type === 'roziere') envelopeKg *= 1.18; // hot-air cone + burner rig
   const mSys = cfg.payloadKg + envelopeKg + cfg.ballastKg;
   // float: V * (rhoAir(h) - rhoGas(h)) = mSys  -> bisect
   const netAt = (h) => V * (isa(h).rho - gasRho(h, cfg.gas)) - mSys;
@@ -64,6 +65,13 @@ export function computePayload(cfg) {
     bandHi = c; bandLo = Math.max(3, c - 4);
     budgetKm = cfg.ballastKg > 0 ? (0.5 * cfg.ballastKg) / kmCost : 0;
     capDays = Math.min(45, Math.max(2, (0.5 * cfg.ballastKg) / dailyBallast));
+  } else if (cfg.type === 'roziere') {
+    // hybrid gas cell + heated air cone: the burner replaces ballast drops for
+    // diurnal compensation, so the consumable is fuel — modest control band,
+    // cheap per-km trim, endurance well beyond zero-pressure
+    bandHi = c; bandLo = Math.max(4, c - 6);
+    budgetKm = cfg.ballastKg > 0 ? (0.9 * cfg.ballastKg) / (0.5 * kmCost) : 0;
+    capDays = Math.min(70, Math.max(3, (0.9 * cfg.ballastKg) / (0.35 * dailyBallast)));
   } else { // adjustable — vented descent reaches down into tropospheric jet layers
     bandHi = c; bandLo = Math.min(Math.max(5, c - 15), Math.max(5, c));
     budgetKm = cfg.ballastKg > 0 ? (0.8 * cfg.ballastKg) / (0.3 * kmCost) : 0;
@@ -424,26 +432,46 @@ export function rankSites(target, perf, captureKm = 200, t0H = 0, members = 6) {
   return out;
 }
 
-// Monte Carlo over wind uncertainty for one site + launch time
-export function monteCarloDay(site, target, perf, t0H, members = 6, captureKm = 200) {
+// One Monte Carlo member for a site + launch time (m = 0 is the nominal run).
+// Callers can accumulate members incrementally and fold them with mcAggregate.
+export function mcMember(site, target, perf, t0H, m, captureKm = 200) {
+  const ens = m === 0 ? null : ensembleWind(m * 7919 + Math.round(t0H) * 131 + 17);
+  return simulate(site, target, {
+    bandLo: perf.bandLo, bandHi: perf.bandHi, budgetKm: perf.budgetKm,
+    capDays: perf.capDays, captureKm, t0H, ens,
+  });
+}
+
+export function mcAggregate(runs) {
   const times = [], closests = [];
   let arrivals = 0;
-  for (let m = 0; m < members; m++) {
-    const ens = m === 0 ? null : ensembleWind(m * 7919 + Math.round(t0H) * 131 + 17);
-    const r = simulate(site, target, {
-      bandLo: perf.bandLo, bandHi: perf.bandHi, budgetKm: perf.budgetKm,
-      capDays: perf.capDays, captureKm, t0H, ens,
-    });
+  for (const r of runs) {
     if (r.arrived) { arrivals++; times.push(r.tArrH); }
     closests.push(r.closestKm);
   }
   times.sort((a, b) => a - b); closests.sort((a, b) => a - b);
   return {
-    p: arrivals / members,
+    p: arrivals / runs.length,
     medT: times.length ? times[Math.floor(times.length / 2)] : null,
     medClosest: closests[Math.floor(closests.length / 2)],
-    members,
+    members: runs.length,
   };
+}
+
+// Monte Carlo over wind uncertainty for one site + launch time
+export function monteCarloDay(site, target, perf, t0H, members = 6, captureKm = 200) {
+  const runs = [];
+  for (let m = 0; m < members; m++) runs.push(mcMember(site, target, perf, t0H, m, captureKm));
+  return mcAggregate(runs);
+}
+
+// Compare launch candidates that may start on different days: prefer arrival,
+// then earliest absolute arrival (launch delay + flight time), then closest approach.
+export function betterLaunch(a, b) {
+  if (a.arrived !== b.arrived) return a.arrived;
+  const offA = (a.startDay || 0) * 24, offB = (b.startDay || 0) * 24;
+  if (a.arrived) return offA + a.tArrH < offB + b.tArrH;
+  return a.closestKm < b.closestKm;
 }
 
 // Scan launch dates for one site: P(arrival) vs start day
@@ -475,7 +503,12 @@ export function compareStrategies(site, target, cfg, captureKm = 200, t0H = 0) {
   rows.push({ key: 'zeropressure', label: 'Zero-pressure — ballast steering',
     detail: zp.canLift ? `${zp.bandLo.toFixed(0)}–${zp.bandHi.toFixed(0)} km band` : 'cannot float',
     r: zp.canLift ? simulate(site, target, { bandLo: zp.bandLo, bandHi: zp.bandHi, budgetKm: zp.budgetKm, capDays: zp.capDays, captureKm, t0H }) : null });
-  // 3. altitude-adjustable
+  // 3. Rozière hybrid, fuel-limited
+  const rz = computePayload({ ...cfg, type: 'roziere' });
+  rows.push({ key: 'roziere', label: 'Rozière — hybrid gas/hot-air, burner trim',
+    detail: rz.canLift ? `${rz.bandLo.toFixed(0)}–${rz.bandHi.toFixed(0)} km band` : 'cannot float',
+    r: rz.canLift ? simulate(site, target, { bandLo: rz.bandLo, bandHi: rz.bandHi, budgetKm: rz.budgetKm, capDays: rz.capDays, captureKm, t0H }) : null });
+  // 4. altitude-adjustable
   const aj = computePayload({ ...cfg, type: 'adjustable' });
   rows.push({ key: 'adjustable', label: 'Adjustable — vent/ballast wind-layer steering',
     detail: aj.canLift ? `${aj.bandLo.toFixed(0)}–${aj.bandHi.toFixed(0)} km band` : 'cannot float',
