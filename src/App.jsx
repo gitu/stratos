@@ -16,7 +16,7 @@ export default class App extends React.Component {
     clickMode: 'target', areaMode: 'country', areaCountryId: 'usa', customArea: null,
     page: typeof window !== 'undefined' && window.location.hash === '#how' ? 'docs' : 'ops',
     isMobile: typeof window !== 'undefined' && window.innerWidth <= 860,
-    menuOpen: false, countrySearch: null,
+    menuOpen: false, countrySearch: null, windAlt: null, windTime: null,
   };
 
   setPage(p) {
@@ -552,6 +552,17 @@ export default class App extends React.Component {
     return r && r.t0H != null ? r.t0H : this.t0H();
   }
 
+  // altitude (km) the wind-field overlay is sampled at: locked layer or balloon
+  windDisplayAlt() {
+    if (this.state.windAlt != null) return this.state.windAlt;
+    const b = this.balloonAt(this.state.scrubH);
+    return b ? b.alt : ((this.perf && this.perf.ceiling) || 12);
+  }
+  // forecast hour the overlay is sampled at: locked time or mission time
+  windDisplayTime() {
+    return this.state.windTime != null ? this.state.windTime : this.selT0H() + this.state.scrubH;
+  }
+
   // Draw strength for a route: the better it ranks (and if it arrives), the stronger.
   routeGrade(i) {
     const n = (this.results || []).length;
@@ -614,7 +625,7 @@ export default class App extends React.Component {
       grid: 'rgba(86,200,232,0.08)',
       dim: 'rgba(120,160,190,0.28)', route: 'rgba(111,213,138,0.65)', sel: '#56c8e8', selGlow: 'rgba(86,200,232,0.3)',
       site: '#5f7a90', target: '#e8b356', balloon: '#56c8e8',
-      wind: 'rgba(140,180,205,0.24)', label: 'rgba(190,210,225,0.9)', city: 'rgba(150,172,190,0.8)', country: 'rgba(86,200,232,0.35)',
+      wind: 'rgba(140,180,205,0.24)', windFast: 'rgba(232,179,86,0.4)', label: 'rgba(190,210,225,0.9)', city: 'rgba(150,172,190,0.8)', country: 'rgba(86,200,232,0.35)',
     };
   }
   drawAll() { this.drawMap(); this.drawProfile(); }
@@ -723,9 +734,8 @@ export default class App extends React.Component {
     }
     // wind field
     if (this.state.showWinds) {
-      const b0 = this.balloonAt(this.state.scrubH);
-      const alt = b0 ? b0.alt : ((this.perf && this.perf.ceiling) || 12);
-      const t = this.selT0H() + this.state.scrubH;
+      const alt = this.windDisplayAlt();
+      const t = this.windDisplayTime();
       const stepPx = 36;
       x.lineWidth = 1;
       for (let py = Math.max(0, cy - R); py < Math.min(H, cy + R); py += stepPx) {
@@ -748,10 +758,11 @@ export default class App extends React.Component {
           const dn = Math.hypot(dx, dy) || 1;
           const k = Math.min(14, s * 0.28);
           dx = dx / dn * k; dy = dy / dn * k;
-          x.strokeStyle = C.wind;
+          const wc = s > 25 ? C.windFast : C.wind;
+          x.strokeStyle = wc;
           x.globalAlpha = Math.min(1, 0.25 + s / 50);
           x.beginPath(); x.moveTo(px - dx / 2, py - dy / 2); x.lineTo(px + dx / 2, py + dy / 2); x.stroke();
-          x.fillStyle = C.wind;
+          x.fillStyle = wc;
           x.beginPath(); x.arc(px + dx / 2, py + dy / 2, 1.1, 0, 7); x.fill();
         }
       }
@@ -946,9 +957,8 @@ export default class App extends React.Component {
     }
     // wind field at balloon altitude / mission time
     if (this.state.showWinds) {
-      const b0 = this.balloonAt(this.state.scrubH);
-      const alt = b0 ? b0.alt : ((this.perf && this.perf.ceiling) || 12);
-      const t = this.selT0H() + this.state.scrubH;
+      const alt = this.windDisplayAlt();
+      const t = this.windDisplayTime();
       x.strokeStyle = C.wind; x.lineWidth = 1;
       const stepPx = 34;
       for (let py = Math.max(0, topY) + stepPx / 2; py < botY; py += stepPx) {
@@ -960,9 +970,11 @@ export default class App extends React.Component {
           const s = Math.hypot(w.u, w.v);
           const k = Math.min(14, s * 0.28);
           const dx = w.u / (s || 1) * k, dy = -w.v / (s || 1) * k;
+          const wc = s > 25 ? C.windFast : C.wind;
+          x.strokeStyle = wc;
           x.globalAlpha = Math.min(1, 0.25 + s / 50);
           x.beginPath(); x.moveTo(px - dx / 2, py - dy / 2); x.lineTo(px + dx / 2, py + dy / 2); x.stroke();
-          x.beginPath(); x.arc(px + dx / 2, py + dy / 2, 1.1, 0, 7); x.fillStyle = C.wind; x.fill();
+          x.beginPath(); x.arc(px + dx / 2, py + dy / 2, 1.1, 0, 7); x.fillStyle = wc; x.fill();
         }
       }
       x.globalAlpha = 1;
@@ -1667,7 +1679,8 @@ export default class App extends React.Component {
                     style={overlayBtn('#5a3028', '#e2705f')}>CLEAR CUSTOM AREA</div>
                 )}
               </div>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end', pointerEvents: 'auto' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6, pointerEvents: 'auto' }}>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
                 <div onClick={() => { this._sphereKey = null; this.setState((st) => ({ globe: !st.globe })); }}
                   style={overlayBtn('#2b4a58', '#56c8e8')}>{s.globe ? 'VIEW: 3D GLOBE' : 'VIEW: 2D MAP'}</div>
                 <div data-testid="wind-source"
@@ -1694,9 +1707,69 @@ export default class App extends React.Component {
                   WIND FIELD {s.showWinds ? 'ON' : 'OFF'}
                 </div>
               </div>
+              {s.showWinds && (
+                <div data-testid="wind-layer" style={{ width: 196, padding: '8px 10px', background: 'rgba(14,19,25,0.85)', border: PANEL_BORDER }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <span style={{ fontSize: 9, letterSpacing: 1, color: '#647a8e' }}>WIND LAYER</span>
+                    <span style={{ fontSize: 10, color: s.windAlt != null ? '#e8b356' : '#56c8e8' }}>
+                      {s.windAlt != null ? s.windAlt.toFixed(1) + ' km' : 'AUTO · BALLOON'}
+                    </span>
+                  </div>
+                  <input type="range" min={0.5} max={25} step={0.5}
+                    value={s.windAlt ?? Math.round(this.windDisplayAlt() * 2) / 2}
+                    onChange={(e) => this.setState({ windAlt: Number(e.target.value) })}
+                    style={{ width: '100%', height: 14 }} />
+                  <div style={{ display: 'flex', gap: 3, marginTop: 6, flexWrap: 'wrap' }}>
+                    <div onClick={() => this.setState({ windAlt: null })} style={{
+                      padding: '2px 6px', fontSize: 9, cursor: 'pointer',
+                      border: '1px solid ' + (s.windAlt == null ? '#2b4a58' : '#1b2530'),
+                      color: s.windAlt == null ? '#56c8e8' : '#647a8e',
+                    }}>AUTO</div>
+                    {[1.5, 5.6, 9.2, 11.8, 16.2, 20.6].map((a) => (
+                      <div key={a} onClick={() => this.setState({ windAlt: a })} style={{
+                        padding: '2px 5px', fontSize: 9, cursor: 'pointer',
+                        border: '1px solid ' + (s.windAlt === a ? '#6b5228' : '#1b2530'),
+                        color: s.windAlt === a ? '#e8b356' : '#647a8e',
+                      }}>{a}</div>
+                    ))}
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', margin: '9px 0 4px' }}>
+                    <span style={{ fontSize: 9, letterSpacing: 1, color: '#647a8e' }}>FORECAST TIME</span>
+                    <span style={{ fontSize: 10, color: s.windTime != null ? '#e8b356' : '#56c8e8' }}>
+                      {s.windTime != null
+                        ? new Date(T0 + s.windTime * 3600e3).toISOString().slice(5, 16).replace('T', ' ') + 'Z'
+                        : 'AUTO · MISSION'}
+                    </span>
+                  </div>
+                  <input type="range" min={0} max={336} step={3}
+                    value={s.windTime ?? Math.min(336, Math.round(this.windDisplayTime() / 3) * 3)}
+                    onChange={(e) => this.setState({ windTime: Number(e.target.value) })}
+                    style={{ width: '100%', height: 14 }} />
+                  <div style={{ display: 'flex', gap: 3, marginTop: 6, flexWrap: 'wrap' }}>
+                    <div onClick={() => this.setState({ windTime: null })} style={{
+                      padding: '2px 6px', fontSize: 9, cursor: 'pointer',
+                      border: '1px solid ' + (s.windTime == null ? '#2b4a58' : '#1b2530'),
+                      color: s.windTime == null ? '#56c8e8' : '#647a8e',
+                    }}>AUTO</div>
+                    {[0, 2, 5, 9, 14].map((d) => (
+                      <div key={d} onClick={() => this.setState({ windTime: d * 24 })} style={{
+                        padding: '2px 5px', fontSize: 9, cursor: 'pointer',
+                        border: '1px solid ' + (s.windTime === d * 24 ? '#6b5228' : '#1b2530'),
+                        color: s.windTime === d * 24 ? '#e8b356' : '#647a8e',
+                      }}>{'D' + d}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              </div>
             </div>
             <div style={{ position: 'absolute', bottom: s.isMobile ? 34 : 10, right: 10, padding: '5px 10px', fontSize: 10, color: '#647a8e', background: 'rgba(14,19,25,0.85)', border: PANEL_BORDER }}>
-              {b ? 'WINDS @ FL' + Math.round(b.alt * 10) / 10 + ' km · ' + this.fmtDur(s.scrubH) : 'WINDS @ FLOAT ALT'}
+              {'WINDS @ '
+                + (s.windAlt != null ? s.windAlt.toFixed(1) + ' km' : b ? 'FL' + Math.round(b.alt * 10) / 10 + ' km' : 'FLOAT ALT')
+                + ' · '
+                + (s.windTime != null
+                  ? new Date(T0 + s.windTime * 3600e3).toISOString().slice(5, 16).replace('T', ' ') + 'Z'
+                  : this.fmtDur(s.scrubH))}
             </div>
             <div style={{ position: 'absolute', bottom: 10, left: 10, padding: '3px 8px', fontSize: 9, color: '#647a8e', background: 'rgba(14,19,25,0.7)' }}>
               {s.windSource === 'live'

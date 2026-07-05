@@ -12,7 +12,8 @@ in the browser against **actual wind forecasts** (Open-Meteo GFS pressure-level 
 ## Features
 
 - **3D globe & 2D Mercator ops map** (canvas-rendered, OSM/Carto raster underlay,
-  orthographic globe with wind-field overlay at the balloon's current altitude)
+  orthographic globe with a wind-field overlay at a selectable altitude and
+  forecast time — defaults to following the balloon)
 - **Live forecast winds** — Open-Meteo GFS at 7 pressure levels (850–50 hPa),
   fetched on startup; toggle back to the simulated climatology any time
 - **Physics model** — ISA atmosphere, helium/hydrogen lift, envelope mass,

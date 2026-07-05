@@ -142,6 +142,31 @@ test.describe('STRATOS Route Planner', () => {
     await expect(page.getByText('VIEW: 3D GLOBE')).toBeVisible();
   });
 
+  test('wind-field layer is selectable by height and time', async ({ page }, testInfo) => {
+    const panel = page.getByTestId('wind-layer');
+    await expect(panel).toBeVisible();
+    await expect(panel).toContainText('AUTO · BALLOON');
+    await expect(panel).toContainText('AUTO · MISSION');
+    // lock the overlay to the 16.2 km pressure level
+    await panel.getByText('16.2', { exact: true }).click();
+    await expect(panel).toContainText('16.2 km');
+    await expect(page.getByText(/WINDS @ 16\.2 km/)).toBeVisible();
+    // lock the forecast time to day 5
+    await panel.getByText('D5', { exact: true }).click();
+    await expect(panel).not.toContainText('AUTO · MISSION');
+    await expect(page.getByText(/WINDS @ 16\.2 km · \d\d-\d\d \d\d:\d\dZ/)).toBeVisible();
+    await shot(page, testInfo, '13-wind-layer');
+    // back to following the balloon and mission clock
+    await panel.getByText('AUTO', { exact: true }).first().click();
+    await panel.getByText('AUTO', { exact: true }).last().click();
+    await expect(panel).toContainText('AUTO · BALLOON');
+    await expect(panel).toContainText('AUTO · MISSION');
+    await expect(page.getByText(/WINDS @ FL/)).toBeVisible();
+    // hiding the wind field hides the layer selector too
+    await page.getByText('WIND FIELD ON').click();
+    await expect(panel).toHaveCount(0);
+  });
+
   test('two-finger pinch zooms the globe, one finger pans', async ({ page }) => {
     const zoom0 = await page.evaluate(() => window.__stratos.view.zoom);
     // synthetic touch pointers: two fingers moving apart = pinch out
