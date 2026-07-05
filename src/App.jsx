@@ -1,5 +1,6 @@
 import React from 'react';
 import * as sim from './sim.js';
+import Explainer from './Explainer.jsx';
 
 const MONO = "'IBM Plex Mono', monospace";
 const PANEL_BORDER = '1px solid #1b2530';
@@ -13,7 +14,15 @@ export default class App extends React.Component {
     selected: 0, scrubH: 0, playing: false, showWinds: true, rev: 0, launchDay: 0,
     globe: true, windSource: 'synthetic', fetching: false, liveError: false,
     clickMode: 'target', areaMode: 'country', areaCountryId: 'usa', customArea: null,
+    page: typeof window !== 'undefined' && window.location.hash === '#how' ? 'docs' : 'ops',
+    isMobile: typeof window !== 'undefined' && window.innerWidth <= 860,
+    menuOpen: false,
   };
+
+  setPage(p) {
+    this.setState({ page: p, menuOpen: false });
+    if (typeof history !== 'undefined') history.replaceState(null, '', p === 'docs' ? '#how' : window.location.pathname);
+  }
 
   async fetchLive() {
     this.setState({ fetching: true, liveError: false });
@@ -93,6 +102,9 @@ export default class App extends React.Component {
     this.fetchLive();
     this._onResize = () => this.drawAll();
     window.addEventListener('resize', this._onResize);
+    this._mq = window.matchMedia('(max-width: 860px)');
+    this._onMq = (e) => this.setState({ isMobile: e.matches, menuOpen: false });
+    this._mq.addEventListener('change', this._onMq);
   }
   componentWillUnmount() {
     window.removeEventListener('resize', this._onResize);
@@ -100,6 +112,7 @@ export default class App extends React.Component {
     clearTimeout(this._deb);
     clearTimeout(this._planTimer);
     this._planGen = (this._planGen || 0) + 1;
+    if (this._mq) this._mq.removeEventListener('change', this._onMq);
     if (this._ro) this._ro.disconnect();
   }
   componentDidUpdate() {
@@ -1196,25 +1209,53 @@ export default class App extends React.Component {
       <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', background: '#0a0e13', color: '#c6d2dd', fontFamily: MONO, fontSize: 12, overflow: 'hidden' }}>
 
         {/* ============ HEADER ============ */}
-        <div style={{ height: 46, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 20, padding: '0 16px', background: '#0e1319', borderBottom: PANEL_BORDER }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{ width: 9, height: 9, borderRadius: '50%', background: '#56c8e8', animation: 'blinkdot 2.4s infinite' }} />
-            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 15, letterSpacing: 2.5, color: '#e8eef4' }}>STRATOS ROUTE PLANNER</div>
+        <div style={{ height: 46, flexShrink: 0, display: 'flex', alignItems: 'center', gap: s.isMobile ? 10 : 20, padding: '0 12px', background: '#0e1319', borderBottom: PANEL_BORDER }}>
+          {s.isMobile && s.page === 'ops' && (
+            <div data-testid="burger" onClick={() => this.setState((st) => ({ menuOpen: !st.menuOpen }))}
+              style={{ padding: '5px 10px', border: '1px solid ' + (s.menuOpen ? '#2b4a58' : '#1b2530'), color: '#56c8e8', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>
+              ☰
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+            <div style={{ width: 9, height: 9, flexShrink: 0, borderRadius: '50%', background: '#56c8e8', animation: 'blinkdot 2.4s infinite' }} />
+            <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: s.isMobile ? 12 : 15, letterSpacing: s.isMobile ? 1.5 : 2.5, color: '#e8eef4', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>STRATOS ROUTE PLANNER</div>
           </div>
-          <div style={{ color: '#647a8e', letterSpacing: 1 }}>LONG-DURATION BALLOON MISSION DESIGN</div>
+          {!s.isMobile && <div style={{ color: '#647a8e', letterSpacing: 1 }}>LONG-DURATION BALLOON MISSION DESIGN</div>}
           <div style={{ flex: 1 }} />
-          <div style={{ display: 'flex', gap: 18, color: '#647a8e' }}>
-            <div>LAUNCH <span data-testid="launch-date" style={{ color: '#c6d2dd' }}>{new Date(T0 + this.selT0H() * 3600e3).toISOString().slice(0, 10)} 00Z</span></div>
-            <div>TGT <span style={{ color: '#e8b356' }}>{this.fmtLL(s.target.lat, s.target.lon)}</span></div>
-            <div>WIND MODEL <span style={{ color: '#6fd58a' }}>{s.windSource === 'live' ? 'OPEN-METEO GFS' : 'SYNTH-CLIM v2'}</span></div>
+          {!s.isMobile && (
+            <div style={{ display: 'flex', gap: 18, color: '#647a8e' }}>
+              <div>LAUNCH <span data-testid="launch-date" style={{ color: '#c6d2dd' }}>{new Date(T0 + this.selT0H() * 3600e3).toISOString().slice(0, 10)} 00Z</span></div>
+              <div>TGT <span style={{ color: '#e8b356' }}>{this.fmtLL(s.target.lat, s.target.lon)}</span></div>
+              <div>WIND MODEL <span style={{ color: '#6fd58a' }}>{s.windSource === 'live' ? 'OPEN-METEO GFS' : 'SYNTH-CLIM v2'}</span></div>
+            </div>
+          )}
+          <div data-testid="docs-toggle" onClick={() => this.setPage(s.page === 'docs' ? 'ops' : 'docs')}
+            style={{ padding: '5px 10px', border: '1px solid ' + (s.page === 'docs' ? '#2b4a58' : '#1b2530'), color: '#56c8e8', cursor: 'pointer', fontSize: 10, letterSpacing: 1, whiteSpace: 'nowrap' }}>
+            {s.page === 'docs' ? '✕ CLOSE' : s.isMobile ? '?' : 'HOW IT WORKS'}
           </div>
         </div>
+
+        {s.page === 'docs' ? <Explainer onClose={() => this.setPage('ops')} /> : <>
 
         {/* ============ MAIN ============ */}
         <div style={{ flex: 1, display: 'flex', minHeight: 0, position: 'relative', flexDirection: 'row' }}>
 
-          {/* ---- CONTROL PANEL ---- */}
-          <div style={{ width: 340, flexShrink: 0, overflowY: 'auto', overflowX: 'hidden', background: '#0e1319', borderRight: PANEL_BORDER, display: 'flex', flexDirection: 'column' }}>
+          {/* backdrop for the mobile drawer */}
+          {s.isMobile && s.menuOpen && (
+            <div data-testid="drawer-backdrop" onClick={() => this.setState({ menuOpen: false })}
+              style={{ position: 'absolute', inset: 0, zIndex: 25, background: 'rgba(4,7,10,0.55)' }} />
+          )}
+
+          {/* ---- CONTROL PANEL (drawer on mobile) ---- */}
+          <div data-testid="control-panel" style={{
+            width: 340, flexShrink: 0, overflowY: 'auto', overflowX: 'hidden', background: '#0e1319',
+            borderRight: PANEL_BORDER, display: 'flex', flexDirection: 'column',
+            ...(s.isMobile ? {
+              position: 'absolute', top: 0, bottom: 0, left: 0, zIndex: 30, width: 'min(340px, 86vw)',
+              transform: s.menuOpen ? 'translateX(0)' : 'translateX(-105%)',
+              transition: 'transform 0.22s ease', boxShadow: s.menuOpen ? '14px 0 40px rgba(0,0,0,0.55)' : 'none',
+            } : {}),
+          }}>
 
             {/* Target */}
             <div style={{ padding: '12px 14px', borderBottom: PANEL_BORDER }}>
@@ -1447,7 +1488,7 @@ export default class App extends React.Component {
             {/* Strategy comparison */}
             <div style={{ padding: '12px 14px' }}>
               <div style={{ fontSize: 10, letterSpacing: 2, color: '#647a8e', marginBottom: 2 }}>ALTITUDE STRATEGY — {selectedName}</div>
-              <div style={{ color: '#41576b', fontSize: 10, marginBottom: 8 }}>same envelope, three control philosophies</div>
+              <div style={{ color: '#41576b', fontSize: 10, marginBottom: 8 }}>same envelope, four control philosophies</div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
                 {(this.strategies || []).map((row) => {
                   const rt = this.resText(row.r);
@@ -1467,7 +1508,14 @@ export default class App extends React.Component {
 
           {/* ---- MAP ---- */}
           <div style={{ flex: 1, minWidth: 0, position: 'relative', background: '#0a0e13' }}
-            ref={(el) => { this._mapWrap = el; if (el && !this._ro) { this._ro = new ResizeObserver(() => this.drawAll()); this._ro.observe(el); } }}>
+            ref={(el) => {
+              this._mapWrap = el;
+              if (el) {
+                if (this._ro) this._ro.disconnect();
+                this._ro = new ResizeObserver(() => this.drawAll());
+                this._ro.observe(el);
+              }
+            }}>
             <canvas ref={(el) => this.bindMapEvents(el)} onClick={this.onMapClick}
               style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: 'crosshair', display: 'block' }} />
             <div style={{ position: 'absolute', top: 10, left: 10, right: 10, display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', pointerEvents: 'none' }}>
@@ -1512,7 +1560,7 @@ export default class App extends React.Component {
                 </div>
               </div>
             </div>
-            <div style={{ position: 'absolute', bottom: 10, right: 10, padding: '5px 10px', fontSize: 10, color: '#647a8e', background: 'rgba(14,19,25,0.85)', border: PANEL_BORDER }}>
+            <div style={{ position: 'absolute', bottom: s.isMobile ? 34 : 10, right: 10, padding: '5px 10px', fontSize: 10, color: '#647a8e', background: 'rgba(14,19,25,0.85)', border: PANEL_BORDER }}>
               {b ? 'WINDS @ FL' + Math.round(b.alt * 10) / 10 + ' km · ' + this.fmtDur(s.scrubH) : 'WINDS @ FLOAT ALT'}
             </div>
             <div style={{ position: 'absolute', bottom: 10, left: 10, padding: '3px 8px', fontSize: 9, color: '#647a8e', background: 'rgba(14,19,25,0.7)' }}>
@@ -1534,15 +1582,16 @@ export default class App extends React.Component {
             <input type="range" min={0} max={this.scrubMaxH()} step={1} value={Math.round(s.scrubH)}
               onChange={(e) => this.setState({ scrubH: Number(e.target.value), playing: false })}
               style={{ flex: 1, height: 18 }} />
-            <div style={{ display: 'flex', gap: 16, color: '#647a8e', fontSize: 11, whiteSpace: 'nowrap' }}>
+            <div style={{ display: 'flex', gap: s.isMobile ? 10 : 16, color: '#647a8e', fontSize: 11, whiteSpace: 'nowrap' }}>
               <div><span style={{ color: '#56c8e8', fontWeight: 600 }}>{this.fmtDur(s.scrubH)}</span></div>
-              <div>{utc.toISOString().slice(0, 16).replace('T', ' ')}Z</div>
-              <div>POS <span style={{ color: '#c6d2dd' }}>{b ? this.fmtLL(b.lat, b.lon) : '—'}</span></div>
+              {!s.isMobile && <div>{utc.toISOString().slice(0, 16).replace('T', ' ')}Z</div>}
+              {!s.isMobile && <div>POS <span style={{ color: '#c6d2dd' }}>{b ? this.fmtLL(b.lat, b.lon) : '—'}</span></div>}
               <div>ALT <span style={{ color: '#e8b356' }}>{b ? b.alt.toFixed(1) + ' km' : '—'}</span></div>
-              <div>WIND <span style={{ color: '#c6d2dd' }}>{b ? wspd.toFixed(0) + ' m/s @ ' + wdir.toFixed(0) + '°' : '—'}</span></div>
+              {!s.isMobile && <div>WIND <span style={{ color: '#c6d2dd' }}>{b ? wspd.toFixed(0) + ' m/s @ ' + wdir.toFixed(0) + '°' : '—'}</span></div>}
             </div>
           </div>
         </div>
+        </>}
       </div>
     );
   }

@@ -42,7 +42,8 @@ test.describe('STRATOS Route Planner', () => {
   test('flies the mission along the selected route', async ({ page }, testInfo) => {
     // wait for the live fetch + incremental planner to settle, or playback would
     // be stopped mid-test when the forecast lands and routes are replaced
-    await expect(page.getByTestId('wind-source')).toHaveText('SRC: OPEN-METEO', { timeout: 75_000 });
+    // (either outcome is fine here — test 02 asserts the live fetch itself)
+    await expect(page.getByTestId('wind-source')).not.toHaveText('FETCHING GFS…', { timeout: 75_000 });
     await expect(page.getByTestId('planner-status')).toContainText('REACH TARGET', { timeout: 30_000 });
     await expect(page.getByTestId('play')).toHaveText('▶ FLY');
     await expect(page.getByText(/^T\+00d 00h$/)).toBeVisible();
@@ -73,6 +74,38 @@ test.describe('STRATOS Route Planner', () => {
     }
     await expect(page.getByTestId('launch-date')).not.toHaveText(date0);
     await shot(page, testInfo, '07-start-day-variants');
+  });
+
+  test('explainer page documents steering, calculations and caveats', async ({ page }, testInfo) => {
+    await page.getByTestId('docs-toggle').click();
+    await expect(page.getByText('HOW THE SIMULATION WORKS')).toBeVisible();
+    await expect(page.getByText('HOW YOU STEER A BALLOON')).toBeVisible();
+    await expect(page.getByText('LIFT & FLOAT CEILING')).toBeVisible();
+    await expect(page.getByText('THE FOUR BALLOON TYPES')).toBeVisible();
+    await expect(page.getByText('WHAT THIS SIMULATION IS NOT — CAVEATS')).toBeVisible();
+    await shot(page, testInfo, '08-explainer');
+    await page.getByText('← BACK TO PLANNER').first().click();
+    await expect(page.getByText('LAUNCH POINTS — RANKED')).toBeVisible();
+  });
+
+  test('mobile: burger drawer for settings, full-screen map', async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByTestId('burger')).toBeVisible();
+    // panel starts off-canvas — the map has the full width
+    const panel = page.getByTestId('control-panel');
+    await expect(panel).not.toBeInViewport();
+    await shot(page, testInfo, '09-mobile-map');
+    await page.getByTestId('burger').click();
+    await expect(panel).toBeInViewport();
+    await expect(page.getByText('LAUNCH POINTS — RANKED')).toBeVisible();
+    await shot(page, testInfo, '10-mobile-drawer');
+    // tap outside the drawer to close it
+    await page.getByTestId('drawer-backdrop').click({ position: { x: 370, y: 300 } });
+    await expect(panel).not.toBeInViewport();
+    // explainer is readable on mobile too
+    await page.getByTestId('docs-toggle').click();
+    await expect(page.getByText('HOW THE SIMULATION WORKS')).toBeVisible();
+    await shot(page, testInfo, '11-mobile-explainer');
   });
 
   test('map click retargets the mission and routes recompute', async ({ page }, testInfo) => {

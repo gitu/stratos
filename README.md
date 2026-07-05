@@ -27,6 +27,10 @@ in the browser against **actual wind forecasts** (Open-Meteo GFS pressure-level 
   stay selectable per point, and better routes draw stronger on the map
 - **Launch-window scan** — arrival probability vs. start date, click to set
 - **Mission playback** — fly the route with a time scrubber and altitude profile
+- **"How it works" explainer** — lift & float-ceiling math, altitude-steering
+  logic, the four balloon types and honest simulation caveats (also at `#how`)
+- **Mobile layout** — burger-menu settings drawer and a full-screen map on
+  small screens
 
 ## Development
 
