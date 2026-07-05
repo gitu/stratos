@@ -16,7 +16,7 @@ export default class App extends React.Component {
     clickMode: 'target', areaMode: 'country', areaCountryId: 'usa', customArea: null,
     page: typeof window !== 'undefined' && window.location.hash === '#how' ? 'docs' : 'ops',
     isMobile: typeof window !== 'undefined' && window.innerWidth <= 860,
-    menuOpen: false,
+    menuOpen: false, countrySearch: null,
   };
 
   setPage(p) {
@@ -105,6 +105,7 @@ export default class App extends React.Component {
     this._mq = window.matchMedia('(max-width: 860px)');
     this._onMq = (e) => this.setState({ isMobile: e.matches, menuOpen: false });
     this._mq.addEventListener('change', this._onMq);
+    window.__stratos = this; // debug/e2e handle
   }
   componentWillUnmount() {
     window.removeEventListener('resize', this._onResize);
@@ -112,6 +113,8 @@ export default class App extends React.Component {
     clearTimeout(this._deb);
     clearTimeout(this._planTimer);
     this._planGen = (this._planGen || 0) + 1;
+    clearTimeout(this._winTimer);
+    this._winGen = (this._winGen || 0) + 1;
     if (this._mq) this._mq.removeEventListener('change', this._onMq);
     if (this._ro) this._ro.disconnect();
   }
@@ -206,18 +209,43 @@ export default class App extends React.Component {
     fetch('https://raw.githubusercontent.com/johan/world.geo.json/master/countries.geo.json')
       .then((r) => r.json())
       .then((gj) => {
+        const ringsOf = (g) => {
+          const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
+          return polys.map((p) => this.thinRing(p[0], 240)).filter((r) => r.length > 3);
+        };
+        const mainRing = (rings) => {
+          let best = null, bestA = 0;
+          for (const r of rings) { const a = this.ringArea(r); if (a > bestA) { bestA = a; best = r; } }
+          return best;
+        };
         const byIso = {};
         for (const f of gj.features || []) byIso[f.id] = f.geometry;
+        // refine the built-in coarse polygons with real borders
         for (const c of this.sim.COUNTRIES) {
           const g = byIso[iso[c.id]];
           if (!g || !g.coordinates) continue;
-          const polys = g.type === 'Polygon' ? [g.coordinates] : g.coordinates;
-          const rings = polys.map((p) => this.thinRing(p[0], 240)).filter((r) => r.length > 3);
+          const rings = ringsOf(g);
           if (!rings.length) continue;
-          let best = null, bestA = 0;
-          for (const r of rings) { const a = this.ringArea(r); if (a > bestA) { bestA = a; best = r; } }
+          const best = mainRing(rings);
           c.rings = rings;
           if (best) c.poly = this.thinRing(best, 110);
+        }
+        // register every other country in the dataset as a selectable launch area
+        const known = new Set(Object.values(iso));
+        const seen = new Set(this.sim.COUNTRIES.map((c) => c.id));
+        for (const f of gj.features || []) {
+          if (!/^[A-Z]{3}$/.test(String(f.id)) || known.has(f.id)) continue;
+          const id = String(f.id).toLowerCase();
+          if (seen.has(id) || !f.geometry || !f.geometry.coordinates) continue;
+          const rings = ringsOf(f.geometry);
+          if (!rings.length) continue;
+          const best = mainRing(rings);
+          if (!best) continue;
+          seen.add(id);
+          this.sim.COUNTRIES.push({
+            id, name: (f.properties && f.properties.name) || f.id,
+            poly: this.thinRing(best, 110), rings,
+          });
         }
         this._sphereKey = null;
         this.recompute();
@@ -387,6 +415,9 @@ export default class App extends React.Component {
   startPlanner(pts, target, areaCountry) {
     const gen = this._planGen = (this._planGen || 0) + 1;
     clearTimeout(this._planTimer);
+    // stale-perf guard: stop any launch-window fill from the previous plan
+    this._winGen = (this._winGen || 0) + 1;
+    clearTimeout(this._winTimer);
     // routes are about to be replaced — don't keep flying along a stale one
     if (this.state.playing) { cancelAnimationFrame(this._raf); this.setState({ playing: false }); }
     const perf = this.perf, captureKm = this.captureKm(), baseT0 = this.t0H();
@@ -466,16 +497,32 @@ export default class App extends React.Component {
     this._planTimer = setTimeout(simTick, 0);
   }
 
-  // Light recompute on selection/variant change: strategies + launch window only.
+  // Light recompute on selection/variant change: strategies sync (cheap), then
+  // the launch-window scan fills in one start date per tick so it renders live.
   recomputeSelection() {
+    const gen = this._winGen = (this._winGen || 0) + 1;
+    clearTimeout(this._winTimer);
     const res = this.selRoute();
     if (!res || !this.perf || !this.perf.canLift) {
       this.strategies = []; this.windowData = [];
-    } else {
-      const { cfg, target } = this.state;
-      this.strategies = this.sim.compareStrategies(res.site, target, cfg, this.captureKm(), res.t0H ?? this.t0H());
-      this.windowData = this.sim.launchWindow(res.site, target, this.perf, { days: 20, stepDays: 2, members: 6, captureKm: this.captureKm() });
+      this.setState((s) => ({ rev: s.rev + 1 }));
+      return;
     }
+    const { cfg, target } = this.state;
+    const perf = this.perf, captureKm = this.captureKm(), site = res.site;
+    this.strategies = this.sim.compareStrategies(site, target, cfg, captureKm, res.t0H ?? this.t0H());
+    this.windowData = [];
+    const days = [];
+    for (let d = 0; d <= 20; d += 2) days.push(d);
+    const tick = () => {
+      if (gen !== this._winGen || !days.length) return;
+      const d = days.shift();
+      const mc = this.sim.monteCarloDay(site, target, perf, d * 24, 6, captureKm);
+      this.windowData.push({ day: d, ...mc });
+      this.setState((s) => ({ rev: s.rev + 1 }));
+      if (days.length) this._winTimer = setTimeout(tick, 0);
+    };
+    this._winTimer = setTimeout(tick, 0);
     this.setState((s) => ({ rev: s.rev + 1 }));
   }
 
@@ -1105,32 +1152,83 @@ export default class App extends React.Component {
       v.lat = this.invMerc(mCursor + (py - t.H / 2) * 2 * Math.PI / worldW2);
       this.drawMap();
     }, { passive: false });
+    // pointer tracking covers mouse drag AND touch: one finger pans,
+    // two fingers pinch-zoom (anchored at the midpoint) + pan together
+    this._pts = new Map();
     el.addEventListener('pointerdown', (e) => {
-      this._drag = { x: e.clientX, y: e.clientY, moved: false };
-      el.setPointerCapture(e.pointerId);
+      try { el.setPointerCapture(e.pointerId); } catch { /* synthetic events */ }
+      this._pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this._pts.size === 2) {
+        const [a, b] = [...this._pts.values()];
+        this._pinch = { d: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+        this._drag = null;
+      } else if (this._pts.size === 1) {
+        this._drag = { x: e.clientX, y: e.clientY, moved: false };
+      }
     });
     el.addEventListener('pointermove', (e) => {
+      if (this._pts.has(e.pointerId)) this._pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      const t = this._mapT; if (!t || !this.view) return;
+      const v = this.view;
+      if (this._pinch && this._pts.size === 2) {
+        const [a, b] = [...this._pts.values()];
+        const d = Math.hypot(a.x - b.x, a.y - b.y) || 1;
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const f = d / this._pinch.d;
+        if (t.mode === 'globe') {
+          this.markInteracting();
+          v.zoom = Math.max(0.85, Math.min(30, v.zoom * f));
+          const k = 60 / t.R;
+          v.lon = this.sim.wrapLon(v.lon - (mx - this._pinch.mx) * k);
+          v.lat = Math.max(-85, Math.min(85, v.lat + (my - this._pinch.my) * k));
+        } else {
+          // keep the geo point under the old midpoint under the new midpoint
+          const rect = el.getBoundingClientRect();
+          const px0 = this._pinch.mx - rect.left, py0 = this._pinch.my - rect.top;
+          const geoLon = v.lon + (px0 - t.W / 2) / t.ppd;
+          const mCur = t.mC - (py0 - t.H / 2) * 2 * Math.PI / t.worldW;
+          v.zoom = Math.max(1, Math.min(600, v.zoom * f));
+          const ppd2 = Math.min(t.W / 360, t.H / 180) * v.zoom;
+          const worldW2 = 360 * ppd2;
+          const px1 = mx - rect.left, py1 = my - rect.top;
+          v.lon = geoLon - (px1 - t.W / 2) / ppd2;
+          v.lat = this.invMerc(mCur + (py1 - t.H / 2) * 2 * Math.PI / worldW2);
+        }
+        this._pinch = { d, mx, my };
+        this._suppressClick = true;
+        this.drawMap();
+        return;
+      }
       if (!this._drag) return;
       const dx = e.clientX - this._drag.x, dy = e.clientY - this._drag.y;
       if (!this._drag.moved && Math.hypot(dx, dy) < 4) return;
       this._drag.moved = true;
-      const t = this._mapT; if (!t || !this.view) return;
       if (t.mode === 'globe') {
         this.markInteracting();
         const k = 60 / t.R;
-        this.view.lon = this.sim.wrapLon(this.view.lon - dx * k);
-        this.view.lat = Math.max(-85, Math.min(85, this.view.lat + dy * k));
+        v.lon = this.sim.wrapLon(v.lon - dx * k);
+        v.lat = Math.max(-85, Math.min(85, v.lat + dy * k));
       } else {
-        this.view.lon -= dx / t.ppd;
-        this.view.lat = this.invMerc(t.mC + dy * 2 * Math.PI / t.worldW);
+        v.lon -= dx / t.ppd;
+        v.lat = this.invMerc(t.mC + dy * 2 * Math.PI / t.worldW);
       }
       this._drag.x = e.clientX; this._drag.y = e.clientY;
       this.drawMap();
     });
-    el.addEventListener('pointerup', () => {
+    const endPointer = (e) => {
+      this._pts.delete(e.pointerId);
+      if (this._pts.size < 2) this._pinch = null;
       if (this._drag && this._drag.moved) this._suppressClick = true;
-      this._drag = null;
-    });
+      if (this._pts.size === 1) {
+        // pinch ended but one finger stays down — continue as a pan
+        const [p] = this._pts.values();
+        this._drag = { x: p.x, y: p.y, moved: true };
+      } else if (!this._pts.size) {
+        this._drag = null;
+      }
+    };
+    el.addEventListener('pointerup', endPointer);
+    el.addEventListener('pointercancel', endPointer);
   }
 
   onMapClick = (e) => {
@@ -1279,18 +1377,55 @@ export default class App extends React.Component {
             {/* Ranked launch sites */}
             <div style={{ padding: '12px 14px', borderBottom: PANEL_BORDER }}>
               <div style={sectionTitle}>LAUNCH AREA</div>
-              <select
-                value={s.areaMode === 'custom' ? 'custom' : s.areaCountryId}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === 'custom') this.setState({ areaMode: 'custom', clickMode: 'launch', selected: 0, scrubH: 0 });
-                  else this.setState({ areaMode: 'country', areaCountryId: val, selected: 0, scrubH: 0 });
+              {(() => {
+                const q = s.countrySearch;
+                const open = q != null;
+                const current = s.areaMode === 'custom'
+                  ? '◆ CUSTOM AREA'
+                  : ((this.sim.COUNTRIES.find((c) => c.id === s.areaCountryId) || {}).name || '').toUpperCase();
+                const list = open
+                  ? [...this.sim.COUNTRIES]
+                      .filter((c) => c.name.toLowerCase().includes(q.toLowerCase()))
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                  : [];
+                const pick = (patch) => {
+                  this.setState({ ...patch, selected: 0, scrubH: 0, countrySearch: null });
                   this.scheduleRecompute();
-                }}
-                style={{ width: '100%', background: '#10161d', color: '#c6d2dd', border: PANEL_BORDER, fontFamily: MONO, fontSize: 11, padding: 6, marginBottom: 8 }}>
-                <option value="custom">◆ CUSTOM AREA (CLICK MAP IN LAUNCH MODE)</option>
-                {this.sim.COUNTRIES.map((c) => <option key={c.id} value={c.id}>{c.name.toUpperCase()}</option>)}
-              </select>
+                };
+                return (
+                  <div style={{ position: 'relative', marginBottom: 8 }}>
+                    <input data-testid="country-search" type="text"
+                      value={open ? q : current}
+                      placeholder="SEARCH COUNTRY…"
+                      onFocus={(e) => { this.setState({ countrySearch: '' }); e.target.select(); }}
+                      onBlur={() => this.setState({ countrySearch: null })}
+                      onChange={(e) => this.setState({ countrySearch: e.target.value })}
+                      style={{ width: '100%', background: '#10161d', color: '#c6d2dd', border: open ? '1px solid #2b4a58' : PANEL_BORDER, fontFamily: MONO, fontSize: 11, padding: 6, outline: 'none' }} />
+                    {open && (
+                      <div data-testid="country-list" style={{
+                        position: 'absolute', top: '100%', left: 0, right: 0, zIndex: 45,
+                        maxHeight: 230, overflowY: 'auto', background: '#0e1319',
+                        border: '1px solid #2b4a58', borderTop: 'none',
+                      }}>
+                        <div onMouseDown={() => pick({ areaMode: 'custom', clickMode: 'launch' })}
+                          style={{ padding: '6px 8px', fontSize: 11, color: '#e8b356', cursor: 'pointer', borderBottom: PANEL_BORDER }}>
+                          ◆ CUSTOM AREA (CLICK MAP IN LAUNCH MODE)
+                        </div>
+                        {list.map((c) => (
+                          <div key={c.id} onMouseDown={() => pick({ areaMode: 'country', areaCountryId: c.id, customArea: null })}
+                            style={{
+                              padding: '6px 8px', fontSize: 11, cursor: 'pointer',
+                              color: c.id === s.areaCountryId && s.areaMode !== 'custom' ? '#56c8e8' : '#9db0c0',
+                            }}>
+                            {c.name.toUpperCase()}
+                          </div>
+                        ))}
+                        {!list.length && <div style={{ padding: '6px 8px', fontSize: 10, color: '#41576b' }}>NO MATCH</div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
               {s.areaMode === 'custom' && (
                 <div style={{ marginBottom: 10 }}>
                   <div style={{ color: '#41576b', fontSize: 10, marginBottom: 6 }}>
@@ -1517,7 +1652,7 @@ export default class App extends React.Component {
               }
             }}>
             <canvas ref={(el) => this.bindMapEvents(el)} onClick={this.onMapClick}
-              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: 'crosshair', display: 'block' }} />
+              style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', cursor: 'crosshair', display: 'block', touchAction: 'none' }} />
             <div style={{ position: 'absolute', top: 10, left: 10, right: 10, display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap', pointerEvents: 'none' }}>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', pointerEvents: 'auto' }}>
                 <div style={{ padding: '5px 8px', fontSize: 10, letterSpacing: 1, color: '#647a8e', background: 'rgba(14,19,25,0.85)', border: PANEL_BORDER }}>CLICK SETS</div>

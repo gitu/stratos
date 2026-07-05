@@ -210,9 +210,9 @@ export function wrapLon(d) {
 }
 
 // ---------- Trajectory simulation with altitude steering ----------
-// opts: { bandLo, bandHi, budgetKm, capDays, captureKm, decideEveryH, altPenalty, t0H, ens }
+// opts: { bandLo, bandHi, budgetKm, capDays, captureKm, decideEveryH, altPenalty, stayBias, t0H, ens }
 export function simulate(start, target, opts) {
-  const o = Object.assign({ captureKm: 200, decideEveryH: 6, altPenalty: 0.9, t0H: 0, ens: null }, opts);
+  const o = Object.assign({ captureKm: 200, decideEveryH: 1, altPenalty: 0.9, stayBias: 1.5, t0H: 0, ens: null }, opts);
   let lat = start.lat, lon = start.lon;
   let alt = o.bandHi;
   let budget = o.budgetKm;
@@ -230,11 +230,14 @@ export function simulate(start, target, opts) {
       const ex0 = dLon * Math.cos(lat * D2R), ey0 = dLat;
       const n = Math.hypot(ex0, ey0) || 1;
       const ex = ex0 / n, ey = ey0 / n;
-      let best = alt, bestScore = -1e9;
+      // staying put is the baseline, with a bias: a move must beat the current
+      // layer by stayBias m/s of progress (after the per-km penalty) to happen
+      const wStay = windAt(lat, lon, alt, o.t0H + tH, o.ens);
+      let best = alt, bestScore = wStay.u * ex + wStay.v * ey + o.stayBias;
       for (let a = o.bandLo; a <= o.bandHi + 1e-6; a += 1) {
-        const w = windAt(lat, lon, a, o.t0H + tH, o.ens);
         const cost = Math.abs(a - alt);
-        if (cost > budget) continue;
+        if (cost < 1e-9 || cost > budget) continue;
+        const w = windAt(lat, lon, a, o.t0H + tH, o.ens);
         const score = w.u * ex + w.v * ey - o.altPenalty * cost;
         if (score > bestScore) { bestScore = score; best = a; }
       }

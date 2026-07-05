@@ -145,6 +145,14 @@ describe('trajectory simulation', () => {
     expect(r.altUsedKm).toBe(0);
     for (const p of r.path) expect(p.alt).toBe(18);
   });
+  it('stay bias adds inertia: an overwhelming bias pins the altitude', () => {
+    const pinned = simulate({ lat: 34.5, lon: -104.2 }, { lat: 48.1, lon: 11.5 }, { ...opts, stayBias: 1e9 });
+    expect(pinned.altUsedKm).toBe(0);
+    for (const p of pinned.path) expect(p.alt).toBe(opts.bandHi);
+    // with the default bias the hourly decisions still steer when it pays off
+    const free = simulate({ lat: 34.5, lon: -104.2 }, { lat: 48.1, lon: 11.5 }, opts);
+    expect(free.altUsedKm).toBeGreaterThan(0);
+  });
 });
 
 describe('mission planning', () => {

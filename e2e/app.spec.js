@@ -142,6 +142,52 @@ test.describe('STRATOS Route Planner', () => {
     await expect(page.getByText('VIEW: 3D GLOBE')).toBeVisible();
   });
 
+  test('two-finger pinch zooms the globe, one finger pans', async ({ page }) => {
+    const zoom0 = await page.evaluate(() => window.__stratos.view.zoom);
+    // synthetic touch pointers: two fingers moving apart = pinch out
+    await page.evaluate(() => {
+      const cv = document.querySelector('canvas');
+      const r = cv.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const ev = (type, id, x, y) => cv.dispatchEvent(new PointerEvent(type, {
+        pointerId: id, pointerType: 'touch', clientX: x, clientY: y, bubbles: true, isPrimary: id === 1,
+      }));
+      ev('pointerdown', 1, cx - 40, cy); ev('pointerdown', 2, cx + 40, cy);
+      ev('pointermove', 1, cx - 120, cy); ev('pointermove', 2, cx + 120, cy);
+      ev('pointerup', 1, cx - 120, cy); ev('pointerup', 2, cx + 120, cy);
+    });
+    const zoom1 = await page.evaluate(() => window.__stratos.view.zoom);
+    expect(zoom1).toBeGreaterThan(zoom0 * 1.5);
+    // one-finger drag pans the view
+    const lon0 = await page.evaluate(() => window.__stratos.view.lon);
+    await page.evaluate(() => {
+      const cv = document.querySelector('canvas');
+      const r = cv.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const ev = (type, id, x, y) => cv.dispatchEvent(new PointerEvent(type, {
+        pointerId: id, pointerType: 'touch', clientX: x, clientY: y, bubbles: true, isPrimary: true,
+      }));
+      ev('pointerdown', 3, cx, cy); ev('pointermove', 3, cx - 80, cy); ev('pointerup', 3, cx - 80, cy);
+    });
+    const lon1 = await page.evaluate(() => window.__stratos.view.lon);
+    expect(lon1).not.toBeCloseTo(lon0, 3);
+  });
+
+  test('country selector is searchable and covers the full world dataset', async ({ page }, testInfo) => {
+    // full country set arrives with the borders fetch
+    await expect.poll(() => page.evaluate(() => window.__stratos.sim.COUNTRIES.length), { timeout: 30_000 })
+      .toBeGreaterThan(100);
+    const search = page.getByTestId('country-search');
+    await search.click();
+    await search.fill('switz');
+    await expect(page.getByTestId('country-list').getByText('SWITZERLAND')).toBeVisible();
+    await shot(page, testInfo, '12-country-search');
+    await page.getByTestId('country-list').getByText('SWITZERLAND').click();
+    await expect(search).toHaveValue('SWITZERLAND');
+    // planner reruns over the newly selected area
+    await expect(page.getByTestId('planner-status')).toContainText('REACH TARGET', { timeout: 30_000 });
+  });
+
   test('custom launch area via launch-point mode', async ({ page }, testInfo) => {
     await page.getByText('LAUNCH PT', { exact: true }).click();
     const canvas = page.locator('canvas').first();

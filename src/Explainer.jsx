@@ -79,17 +79,19 @@ m_system = payload + envelope + ballast        envelope ≈ 0.045 · V^0.8  (kg)
           A balloon that can change altitude can hop between these conveyor belts.
         </P>
         <P>
-          The simulator makes a steering decision every <K>6 hours</K>. It scans every whole-kilometer
-          altitude inside the balloon&apos;s control band and scores each layer:
+          The simulator re-evaluates its altitude <K>every hour</K>, but with built-in inertia: staying
+          in the current layer gets a bonus, so the balloon only maneuvers when another layer is clearly
+          better. It scans every whole-kilometer altitude inside the control band and scores each layer:
         </P>
-        <Code>{`score(a) = wind(a) · direction_to_target  −  0.9 · |a − current_alt|
+        <Code>{`stay      = wind(current) · direction_to_target  +  1.5   (inertia bonus)
+score(a)  = wind(a)       · direction_to_target  −  0.9 · |a − current_alt|
 
-pick the altitude with the best score,
-pay |Δalt| km from the maneuver budget — no budget left, no move.`}</Code>
+move only if some layer beats staying — then pay |Δalt| km
+from the maneuver budget. No budget left, no move.`}</Code>
         <P>
-          The first term rewards layers whose wind pushes toward the target; the penalty term stops the
-          balloon from wasting consumables chasing marginal gains. Between decisions the balloon simply
-          drifts: position advances hourly at the interpolated wind for its layer.
+          The first term rewards layers whose wind pushes toward the target; the per-km penalty and the
+          stay bonus stop the balloon from wasting consumables chasing marginal gains or jittering
+          between similar layers. Position advances hourly at the interpolated wind for its layer.
         </P>
         <P>
           This is why the <Em>adjustable</Em> balloon dominates most missions — its deep band reaches the
